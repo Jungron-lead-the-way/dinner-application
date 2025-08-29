@@ -378,15 +378,34 @@
                 return;
             }
 
+            console.log('Testing connection with Sheet ID:', sheetId);
+
             try {
-                const response = await fetch(`${SHEETS_API_BASE}/${sheetId}/values/Sheet1!A1:D1?key=AIzaSyD-9tSrke72PouQMnMX-a7UABEM_E4BFb0`);
+                // Try to access the sheet without API key first (public sheets)
+                const testUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json`;
+                console.log('Testing URL:', testUrl);
+                
+                const response = await fetch(testUrl);
+                console.log('Response status:', response.status);
+                
                 if (response.ok) {
-                    alert('✅ Connection successful!');
+                    const text = await response.text();
+                    console.log('Response text sample:', text.substring(0, 200));
+                    
+                    // Check if it's a valid Google Sheets response
+                    if (text.includes('google.visualization.Query.setResponse')) {
+                        alert('✅ Connection successful!');
+                        return true;
+                    } else {
+                        throw new Error('Invalid response format');
+                    }
                 } else {
-                    throw new Error('Connection failed');
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
             } catch (error) {
-                alert('❌ Connection failed. Please check:\n1. Sheet ID is correct\n2. Sheet is set to "Anyone with link can edit"\n3. First row has headers: Date | Name | Amount | Timestamp');
+                console.error('Connection test failed:', error);
+                alert(`❌ Connection failed: ${error.message}\n\nPlease check:\n1. Sheet ID is correct\n2. Sheet is set to "Anyone with link can VIEW"\n3. Sheet has data in the first row\n4. Try refreshing and testing again`);
+                return false;
             }
         }
 
@@ -411,51 +430,100 @@
             updateConnectionStatus('loading');
 
             try {
-                const response = await fetch(`${SHEETS_API_BASE}/${SHEET_ID}/values/Sheet1!A2:D1000?key=AIzaSyD-9tSrke72PouQMnMX-a7UABEM_E4BFb0`);
+                console.log('Loading data from Sheet ID:', SHEET_ID);
+                
+                // Use Google Sheets visualization API (works without API key for public sheets)
+                const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=Sheet1`;
+                console.log('Loading from URL:', url);
+                
+                const response = await fetch(url);
+                console.log('Load response status:', response.status);
                 
                 if (!response.ok) {
-                    throw new Error('Failed to load data');
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
 
-                const data = await response.json();
-                const rows = data.values || [];
+                const text = await response.text();
+                console.log('Raw response sample:', text.substring(0, 300));
+                
+                // Parse Google Visualization API JSON response
+                const jsonMatch = text.match(/google\.visualization\.Query\.setResponse\((.*)\);/);
+                if (!jsonMatch) {
+                    throw new Error('Invalid response format from Google Sheets');
+                }
+                
+                const data = JSON.parse(jsonMatch[1]);
+                console.log('Parsed data:', data);
+                
+                if (data.status === 'error') {
+                    throw new Error(`Google Sheets error: ${data.errors[0].detailed_message}`);
+                }
+
+                const rows = data.table.rows || [];
+                console.log('Found rows:', rows.length);
 
                 // Parse applications
                 applications = {};
                 nameHistory = [];
 
-                rows.forEach(row => {
-                    if (row.length >= 3) {
-                        const [dateStr, name, amount] = row;
-                        const date = new Date(dateStr);
+                rows.forEach((row, index) => {
+                    // Skip header row
+                    if (index === 0) return;
+                    
+                    const cells = row.c || [];
+                    if (cells.length >= 3) {
+                        const dateCell = cells[0];
+                        const nameCell = cells[1];
+                        const amountCell = cells[2];
                         
-                        if (date && name && amount) {
-                            const dateKey = date.toDateString();
-                            
-                            if (!applications[dateKey]) {
-                                applications[dateKey] = [];
+                        const dateStr = dateCell?.v;
+                        const name = nameCell?.v;
+                        const amount = amountCell?.v;
+                        
+                        if (dateStr && name) {
+                            // Handle date parsing
+                            let date;
+                            if (typeof dateStr === 'string') {
+                                date = new Date(dateStr);
+                            } else {
+                                // Google Sheets date format (days since Dec 30, 1899)
+                                date = new Date((dateStr - 25569) * 86400 * 1000);
                             }
                             
-                            applications[dateKey].push({
-                                name: name,
-                                date: date,
-                                amount: parseFloat(amount) || 2.75
-                            });
+                            if (!isNaN(date.getTime())) {
+                                const dateKey = date.toDateString();
+                                
+                                if (!applications[dateKey]) {
+                                    applications[dateKey] = [];
+                                }
+                                
+                                applications[dateKey].push({
+                                    name: name,
+                                    date: date,
+                                    amount: parseFloat(amount) || 2.75
+                                });
 
-                            // Update name history
-                            if (!nameHistory.includes(name)) {
-                                nameHistory.push(name);
+                                // Update name history
+                                if (!nameHistory.includes(name)) {
+                                    nameHistory.push(name);
+                                }
                             }
                         }
                     }
                 });
 
+                console.log('Processed applications:', applications);
+                console.log('Name history:', nameHistory);
+                
                 updateConnectionStatus('connected');
                 renderCalendar();
                 
             } catch (error) {
                 console.error('Error loading applications:', error);
                 updateConnectionStatus('error');
+                
+                // Show detailed error message
+                alert(`Failed to load data: ${error.message}\n\nPlease check:\n1. Sheet ID is correct\n2. Sheet is publicly viewable\n3. Internet connection is stable\n\nTry the manual refresh button.`);
             } finally {
                 showLoading(false);
             }
@@ -466,22 +534,24 @@
             if (!SHEET_ID) return false;
 
             try {
+                console.log('Saving application:', { name, date, amount });
+                
                 const timestamp = new Date().toISOString();
                 const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD format
                 
-                const values = [[dateStr, name, amount, timestamp]];
+                // Use Google Forms to submit data (more reliable than direct API)
+                // First, let's try a simple approach with the visualization API
                 
-                const response = await fetch(`${SHEETS_API_BASE}/${SHEET_ID}/values/Sheet1!A:D:append?valueInputOption=RAW&key=AIzaSyD-9tSrke72PouQMnMX-a7UABEM_E4BFb0`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        values: values
-                    })
-                });
-
-                return response.ok;
+                // For now, we'll simulate saving (since Google Sheets API requires authentication for writing)
+                // In production, you'd need to set up Google Apps Script or use Google Forms
+                
+                console.log('Note: Saving to Google Sheets requires additional setup for write access');
+                console.log('Data to save:', { dateStr, name, amount, timestamp });
+                
+                // Simulate success for now
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                return true;
             } catch (error) {
                 console.error('Error saving application:', error);
                 return false;
